@@ -33,12 +33,15 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"go.uber.org/zap"
 
 	"github.com/NYTimes/gziphandler"
 	"github.com/dgryski/go-expirecache"
-	"github.com/dgryski/go-trigram"
+	trigram "github.com/dgryski/go-trigram"
+	postings "github.com/dgryski/go-postings"
+
 	"github.com/dgryski/httputil"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	"github.com/lomik/go-carbon/helper"
@@ -48,6 +51,7 @@ import (
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/filter"
 	"github.com/syndtr/goleveldb/leveldb/opt"
+	"github.com/kanatohodets/carbonsearch/index/text/document"
 )
 
 type metricStruct struct {
@@ -235,6 +239,7 @@ type CarbonserverListener struct {
 	findCacheEnabled  bool
 	findCache         queryCache
 	trigramIndex      bool
+	postingsIndex     bool
 
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
@@ -259,7 +264,8 @@ type jsonMetricDetailsResponse struct {
 }
 
 type fileIndex struct {
-	idx     trigram.Index
+	tidx 	trigram.Index
+	idx     *postings.CompressedIndex
 	files   []string
 	details map[string]*protov3.MetricDetails
 
@@ -278,6 +284,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		accessLogger:      zapwriter.Logger("access"),
 		findCache:         queryCache{ec: expirecache.New(0)},
 		trigramIndex:      true,
+		postingsIndex:     false,
 		percentiles:       []int{100, 99, 98, 95, 75, 50},
 	}
 }
@@ -324,6 +331,11 @@ func (listener *CarbonserverListener) SetFindCacheEnabled(enabled bool) {
 func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
 	listener.trigramIndex = enabled
 }
+
+func (listener *CarbonserverListener) SetPostingsIndex(enabled bool) {
+	listener.postingsIndex = enabled
+}
+
 func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 	listener.internalStatsDir = dbPath
 }
@@ -463,14 +475,37 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
 	atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
 
+	var pruned int
+	var idx trigram.Index
+	var indexSize int
+	var compressedIndex *postings.CompressedIndex
+	var indexingRuntime time.Duration
+
 	t0 = time.Now()
-	idx := trigram.NewIndex(files)
-
-	indexingRuntime := time.Since(t0)
-	atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(indexingRuntime.Nanoseconds()))
-	indexSize := len(idx)
-
-	pruned := idx.Prune(0.95)
+	if listener.trigramIndex {
+		idx = trigram.NewIndex(files)
+		indexingRuntime = time.Since(t0)
+		atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(indexingRuntime.Nanoseconds()))
+		indexSize = len(idx)
+		pruned = idx.Prune(0.95)
+	} else if listener.postingsIndex {
+		postingsIndex := postings.NewIndex(nil)
+		for _, fname := range files {
+			if fname == "" {
+				continue
+			}
+			termIDs, err := document.Tokenize(fname)
+			if err != nil {
+				fmt.Sprintf("Couldn't tokenize %v due to %v", fname, err)
+				continue
+			}
+			postingsIndex.AddDocument(unsafeTermIDSlice(termIDs))
+		}
+		compressedIndex = postings.NewCompressedIndex(postingsIndex)
+		indexingRuntime = time.Since(t0)
+		indexSize = 0
+		pruned = 0
+	}
 
 	tl := time.Now()
 	fidx := listener.CurrentFileIndex()
@@ -494,7 +529,8 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	rdTimeUpdateRuntime := time.Since(tl)
 
 	listener.UpdateFileIndex(&fileIndex{
-		idx:         idx,
+		idx:         compressedIndex,//postingsIndex
+		tidx: 		 idx,
 		files:       files,
 		details:     details,
 		freeSpace:   freeSpace,
@@ -590,40 +626,24 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 	fidx := listener.CurrentFileIndex()
 
 	fallbackToFS := false
-	if listener.trigramIndex == false || (fidx != nil && len(fidx.files) == 0) {
+	if (listener.postingsIndex == false && listener.trigramIndex == false) || (fidx != nil && len(fidx.files) == 0) {
 		fallbackToFS = true
 	}
 
 	if fidx != nil && !useGlob {
 		// use the index
-		docs := make(map[trigram.DocID]struct{})
-
 		for _, g := range globs {
 
-			gpath := "/" + g
-
-			ts := extractTrigrams(g)
-
-			// TODO(dgryski): If we have 'not enough trigrams' we
-			// should bail and use the file-system glob instead
-
-			ids := fidx.idx.QueryTrigrams(ts)
-
-			for _, id := range ids {
-				docid := trigram.DocID(id)
-				if _, ok := docs[docid]; !ok {
-					matched, err := filepath.Match(gpath, fidx.files[id])
-					if err == nil && matched {
-						docs[docid] = struct{}{}
-					}
-				}
+			if listener.trigramIndex {
+				//use trigram index
+				// TODO(dgryski): If we have 'not enough trigrams' we
+				// should bail and use the file-system glob instead
+				files = queryTrigramIndex(g, fidx, listener)
+			} else if listener.postingsIndex {
+				//use postings index
+				files = queryPostingsIndex(g, fidx, listener)
 			}
 		}
-
-		for id := range docs {
-			files = append(files, listener.whisperData+fidx.files[id])
-		}
-
 		sort.Strings(files)
 	}
 
@@ -823,7 +843,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	)
 
 	listener.exitChan = make(chan struct{})
-	if listener.trigramIndex && listener.scanFrequency != 0 {
+	if (listener.postingsIndex || listener.trigramIndex) && listener.scanFrequency != 0 {
 		listener.forceScanChan = make(chan struct{})
 		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), listener.forceScanChan, listener.exitChan)
 		listener.forceScanChan <- struct{}{}
@@ -1001,4 +1021,62 @@ func extractTrigrams(query string) []trigram.T {
 	}
 
 	return trigrams
+}
+
+func unsafeTermIDSlice(v []uint32) []postings.TermID {
+	return *(*[]postings.TermID)(unsafe.Pointer(&v))
+}
+
+func queryTrigramIndex(g string, index *fileIndex, listener *CarbonserverListener) []string {
+	docs := make(map[trigram.DocID]struct{})
+	gpath := "/" + g
+
+	ts := extractTrigrams(g)
+	ids := index.tidx.QueryTrigrams(ts)
+	for _, id := range ids {
+		docid := trigram.DocID(id)
+		if _, ok := docs[docid]; !ok {
+			matched, err := filepath.Match(gpath, index.files[id])
+			if err == nil && matched {
+				docs[docid] = struct{}{}
+			}
+		}
+	}
+	var files []string
+	for id := range docs {
+		files = append(files, listener.whisperData+index.files[id])
+	}
+	return files
+}
+
+func queryPostingsIndex(g string, index *fileIndex, listener *CarbonserverListener) []string {
+	docs := make(map[postings.DocID]struct{})
+	gpath := "/" + g
+
+
+	termIDs, err := document.Tokenize(gpath)
+	if err != nil {
+		fmt.Println("Problem tokenizing")
+	}
+	tids := unsafeTermIDSlice(termIDs)
+
+	var got postings.Postings
+	if len(tids) > 0 {
+		got = postings.Query(index.idx, tids)
+	}
+
+	for _, id := range got {
+		docid := id
+		if _, ok := docs[docid]; !ok {
+			matched, err := filepath.Match(gpath, index.files[id])
+			if err == nil && matched {
+				docs[docid] = struct{}{}
+			}
+		}
+	}
+	var files []string
+	for id := range docs {
+		files = append(files, listener.whisperData+index.files[id])
+	}
+	return files
 }
