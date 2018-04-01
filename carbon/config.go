@@ -109,11 +109,7 @@ type carbonserverConfig struct {
 	FailOnMaxGlobs          bool      `toml:"fail-on-max-globs"`
 	MetricsAsCounters       bool      `toml:"metrics-as-counters"`
 	TrigramIndex            bool      `toml:"trigram-index"`
-<<<<<<< Updated upstream
-=======
 	PostingsIndex           bool      `toml:"postings-index"`
-	GraphiteWeb10StrictMode bool      `toml:"graphite-web-10-strict-mode"`
->>>>>>> Stashed changes
 	InternalStatsDir        string    `toml:"internal-stats-dir"`
 	Percentiles             []int     `toml:"stats-percentiles"`
 }
