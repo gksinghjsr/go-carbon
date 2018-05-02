@@ -23,6 +23,17 @@ func retentionsV3toV2(ptr *[]protov3.Retention) *[]protov2.Retention {
 	return (*[]protov2.Retention)(unsafe.Pointer(ptr))
 }
 
+func getV2Retentions(retentionsV3 *[]protov3.Retention) []protov2.Retention {
+	var retentionsV2 []protov2.Retention
+	for _, retention := range *retentionsV3 {
+		retentionsV2 = append(retentionsV2, protov2.Retention{
+			NumberOfPoints: int32(retention.NumberOfPoints),
+			SecondsPerPoint: int32(retention.SecondsPerPoint),
+		})
+	}
+	return retentionsV2
+}
+
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /info/?target=the.metric.Name&format=json
 	t0 := time.Now()
@@ -147,12 +158,13 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 			r = response.Metrics[0]
 		}
 
+		retentionsV2 := getV2Retentions(&r.Retentions)
 		response := protov2.InfoResponse{
 			Name:              r.Name,
 			AggregationMethod: r.ConsolidationFunc,
 			MaxRetention:      int32(r.MaxRetention),
 			XFilesFactor:      r.XFilesFactor,
-			Retentions:        *retentionsV3toV2(&r.Retentions),
+			Retentions:        retentionsV2,
 		}
 		b, err = response.Marshal()
 	}
