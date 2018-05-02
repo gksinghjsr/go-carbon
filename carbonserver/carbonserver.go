@@ -537,6 +537,9 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 	var globs []string
 	if !strings.HasSuffix(query, "*") {
 		globs = append(globs, query+".wsp")
+		if query == "." || query == "/" {
+			globs = []string{"*"}
+		}
 		logger.Debug("appending file to globs struct",
 			zap.Strings("globs", globs),
 		)
