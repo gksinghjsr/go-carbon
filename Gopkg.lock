@@ -48,6 +48,18 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/dgryski/go-groupvarint"
+  packages = ["."]
+  revision = "b53c21b6117ddd4b277c72529b11940f8bad5347"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/dgryski/go-postings"
+  packages = ["."]
+  revision = "fc7104be7e5849d5b446236a3ded909ff5250a5e"
+
+[[projects]]
+  branch = "master"
   name = "github.com/dgryski/go-trigram"
   packages = ["."]
   revision = "79ec494e1ad015aca936154d0eacd715623c1b40"
@@ -144,6 +156,12 @@
   packages = ["."]
   revision = "317e0006254c44a0ac427cc52a0e083ff0b9622f"
   version = "v2.0.0"
+
+[[projects]]
+  name = "github.com/kanatohodets/carbonsearch"
+  packages = ["index/text/document"]
+  revision = "c92fe8f5b6d93bc44451d1b0f95af1c53e6a2cae"
+  version = "v0.16.1"
 
 [[projects]]
   branch = "master"
@@ -438,6 +456,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "54f0b954782ef701c4afe0129360c3393af6191618e15486a54751a5ccdab218"
+  inputs-digest = "c387692a9878a81de7f148924058806934ed8dedec3ad090d4dd6e02f3600ea0"
   solver-name = "gps-cdcl"
   solver-version = 1
