@@ -51,6 +51,10 @@
 
 [[constraint]]
   branch = "master"
+  name = "github.com/dgryski/go-postings"
+
+[[constraint]]
+  branch = "master"
   name = "github.com/dgryski/httputil"
 
 [[constraint]]
